@@ -2,6 +2,25 @@
 
 Acest proiect este o aplicație interactivă de procesare a imaginilor dezvoltată în C++ folosind OpenGL. Permite aplicarea de filtre și efecte complexe asupra imaginilor, atât pe **GPU (Shaders)** pentru performanță maximă în timp real, cât și pe **CPU** (cu variante paralele și optimizate). Piesa centrală este un filtru de blur interactiv, tip "Bokeh" (Focus), controlat cu mouse-ul, alături de o suită de filtre artistice și de analiză a imaginii.
 
+
+## Galerie foto
+
+<p align="center">
+  <img src="screenshots/poza1.PNG" width="48%" />
+  <img src="screenshots/poza2.PNG" width="48%" />
+</p>
+<p align="center">
+  <img src="screenshots/poza3.PNG" width="48%" />
+  <img src="screenshots/poza4.PNG" width="48%" />
+</p>
+<p align="center">
+  <img src="screenshots/poza5.PNG" width="48%" />
+  <img src="screenshots/poza6.PNG" width="48%" />
+</p>
+<p align="center">
+  <img src="screenshots/poza7.PNG" width="48%" />
+  <img src="screenshots/poza8.PNG" width="48%" />
+</p>
 ---
 
 ## Funcționalități Principale & Bonusuri
