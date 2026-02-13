@@ -3,24 +3,17 @@
 Acest proiect este o aplicație interactivă de procesare a imaginilor dezvoltată în C++ folosind OpenGL. Permite aplicarea de filtre și efecte complexe asupra imaginilor, atât pe **GPU (Shaders)** pentru performanță maximă în timp real, cât și pe **CPU** (cu variante paralele și optimizate). Piesa centrală este un filtru de blur interactiv, tip "Bokeh" (Focus), controlat cu mouse-ul, alături de o suită de filtre artistice și de analiză a imaginii.
 
 
-## Galerie foto
+## 📸 Galerie foto
 
-<p align="center">
-  <img src="screenshots/poza1.PNG" width="48%" />
-  <img src="screenshots/poza2.PNG" width="48%" />
-</p>
-<p align="center">
-  <img src="screenshots/poza3.PNG" width="48%" />
-  <img src="screenshots/poza4.PNG" width="48%" />
-</p>
-<p align="center">
-  <img src="screenshots/poza5.PNG" width="48%" />
-  <img src="screenshots/poza6.PNG" width="48%" />
-</p>
-<p align="center">
-  <img src="screenshots/poza7.PNG" width="48%" />
-  <img src="screenshots/poza8.PNG" width="48%" />
-</p>
+| <img src="screenshots/poza1.PNG" width="100%" /> | <img src="screenshots/poza2.PNG" width="100%" /> |
+|:---:|:---:|
+| *Efect de Blur Interactiv (Focus)* | *Afișarea măștii de ponderare (Tasta 5)* |
+| <img src="screenshots/poza3.PNG" width="100%" /> | <img src="screenshots/poza4.PNG" width="100%" /> |
+| *Canny Edge Detection (Tasta D)* | *Efect de Pictură în Ulei (Tasta 6)* |
+| <img src="screenshots/poza5.PNG" width="100%" /> | <img src="screenshots/poza6.PNG" width="100%" /> |
+| *Schiță în Creion (Tasta 7)* | *Thermal Vision / Heatmap (Tasta 8)* |
+| <img src="screenshots/poza7.PNG" width="100%" /> | <img src="screenshots/poza8.PNG" width="100%" /> |
+| *Bilateral Filter (Tasta 9)* | *Vizualizare interfață (HUD)* |
 ---
 
 ## Funcționalități Principale & Bonusuri
@@ -40,7 +33,7 @@ Acest proiect este o aplicație interactivă de procesare a imaginilor dezvoltat
 
 ---
 
-## ontroale și Interacțiune
+## Controale și Interacțiune
 
 * **Mouse Left-Click (Hold):** Mută zona de claritate (focus) pe imagine.
 * **`F`** - Deschide dialogul pentru a încărca o imagine nouă.
@@ -66,7 +59,7 @@ Acest proiect este o aplicație interactivă de procesare a imaginilor dezvoltat
 
 ---
 
-##Detalii Tehnice
+## Detalii Tehnice
 
 * **OpenGL Framebuffers (FBO):** Implementarea pe GPU folosește tehnici de *Ping-Pong Rendering*. Blur-ul Gaussian este separat în două treceri (Pass 1: Orizontal, Pass 2: Vertical) folosind două FBO-uri cu texturi de tip `GL_RGBA16F` pentru a preveni pierderea preciziei datelor.
 * **OpenMP:** Variantele algoritmilor de pe CPU folosesc directive `#pragma omp parallel for` pentru a distribui calculul pe mai multe thread-uri.
