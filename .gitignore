@@ -1,0 +1,7 @@
+build*
+/**/bin
+/**/.vs
+/**/obj
+components_hidden
+build/
+*.zip

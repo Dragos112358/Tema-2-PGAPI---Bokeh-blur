@@ -1,0 +1,74 @@
+#version 430
+
+// Input
+layout(location = 0) in vec3 v_position;
+layout(location = 1) in vec3 v_normal;
+layout(location = 2) in vec2 v_texture_coord;
+
+// Uniform properties
+uniform mat4 Model;
+uniform vec3 generator_position;
+uniform float deltaTime;
+
+out float vert_lifetime;
+out float vert_iLifetime;
+out vec3 worldPos;
+
+struct Particle
+{
+    vec4 position;
+    vec4 speed;
+    vec4 iposition;
+    vec4 ispeed;
+    float delay;
+    float iDelay;
+    float lifetime;
+    float iLifetime;
+};
+
+
+layout(std430, binding = 0) buffer particles {
+    Particle data[];
+};
+
+
+float rand(vec2 co)
+{
+    return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+
+void main()
+{
+    int is_active = 1;
+    vec3 pos = data[gl_VertexID].position.xyz;
+    vec3 spd = data[gl_VertexID].speed.xyz;
+
+    float dt = deltaTime*3;
+
+    //pos = pos + spd * dt + vec3(0, -0.9, 0) * dt * dt/2.0f ; //era 0.9
+    pos = pos + spd * dt + vec3(0, -0.9, 0) * dt * dt/2.0f ;
+    spd = spd + vec3(-0.9, 0.0, 0.0) * dt;
+    //aici era  spd = spd + vec3(0, -0.9, 0) * dt;
+
+    data[gl_VertexID].lifetime += dt;
+    /*if (data[gl_VertexID].lifetime >= data[gl_VertexID].iLifetime) {
+        pos = data[gl_VertexID].iposition.xyz;  
+        spd = data[gl_VertexID].ispeed.xyz;     
+        data[gl_VertexID].lifetime = 0.0;  
+        is_active = 0;
+    }*/
+    data[gl_VertexID].position.xyz = pos;
+    data[gl_VertexID].speed.xyz = spd;
+    vert_lifetime = data[gl_VertexID].lifetime;
+    vert_iLifetime = data[gl_VertexID].iLifetime;
+
+    worldPos = (Model * vec4(pos + generator_position, 1)).xyz;
+    if (is_active == 1) {
+        gl_Position = Model * vec4(pos + generator_position, 1);
+    }
+    else
+    {
+     gl_Position = vec4(-1000.0, -1000.0, -1000.0, 1.0);
+    }
+}

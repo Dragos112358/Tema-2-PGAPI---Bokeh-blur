@@ -1,0 +1,902 @@
+
+/*Bonusuri implementate:
+* Functie canny edge detection
+* implementare pe gpu
+* imbunatatire ca scriu pe ecran datele
+* Todo:
+* efect bokeh la compute kernels
+* Optimizări de tip Circular Separable Convolution (10-20p)
+* key up -> creste blurul, key down -> scade blurul
+*
+*/
+
+#include "lab_m2/Tema2/Tema2.h"
+
+#include <vector>
+#include <iostream>
+#include <algorithm>
+#include <cmath>
+
+#include "pfd/portable-file-dialogs.h"
+#include "lab_extra/basic_text/basic_text.h"
+
+using namespace std;
+using namespace m2;
+
+// Macro pentru a evita conflictele cu std::min/max pe Windows
+#ifdef _WIN32
+#undef min
+#undef max
+#endif
+
+Tema2::Tema2()
+{
+    focusPos = glm::vec2(0, 0);
+    focusRadius = 100.0f;
+    viewMode = 0; // Default: Final + Overlay
+    showCanny = false;
+    cannyTexture = nullptr;
+
+    fboHorizontal = 0;
+    textureHorizontal = 0;
+    fboVertical = 0;
+    textureVertical = 0;
+}
+
+Tema2::~Tema2()
+{
+    glDeleteFramebuffers(1, &fboHorizontal);
+    glDeleteTextures(1, &textureHorizontal);
+    glDeleteFramebuffers(1, &fboVertical);
+    glDeleteTextures(1, &textureVertical);
+
+    // Stergem textura canny daca exista
+    if (cannyTexture) delete cannyTexture;
+}
+gfxc::TextRenderer* textRenderer;
+void Tema2::Init()
+{
+    // 1. Incarcam imaginea
+    originalImage = TextureManager::LoadTexture(PATH_JOIN(window->props.selfDir, RESOURCE_PATH::TEXTURES, "cube", "pos_x.png"), nullptr, "image", true, true);
+    //pentru partea de text
+    glm::vec2 resolution2 = window->GetResolution();
+    textRenderer = new gfxc::TextRenderer(window->props.selfDir, resolution2.x, resolution2.y);
+    textRenderer->Load(PATH_JOIN(window->props.selfDir, RESOURCE_PATH::FONTS, "Hack-Bold.ttf"), 18);
+    // 2. Mesh Quad
+    {
+        Mesh* mesh = new Mesh("quad");
+        mesh->LoadMesh(PATH_JOIN(window->props.selfDir, RESOURCE_PATH::MODELS, "primitives"), "quad.obj");
+        mesh->UseMaterials(false);
+        meshes[mesh->GetMeshID()] = mesh;
+    }
+
+    // 3. Framebuffers
+    glm::ivec2 res = window->GetResolution();
+    CreateFramebuffers(res.x, res.y);
+
+    // Initializam focusul in centrul ecranului pentru a se vedea efectul din start
+    focusPos = glm::vec2(res.x / 2.0f, res.y / 2.0f);
+
+    std::string shaderPath = PATH_JOIN(window->props.selfDir, SOURCE_PATH::M2, "Tema2", "shaders");
+
+    // 4. Shaders
+    {
+        Shader* shader = new Shader("BlurHorizontal");
+        shader->AddShader(PATH_JOIN(shaderPath, "VertexShader.glsl"), GL_VERTEX_SHADER);
+        shader->AddShader(PATH_JOIN(shaderPath, "FragmentShaderHorizontal.glsl"), GL_FRAGMENT_SHADER);
+        shader->CreateAndLink();
+        shaders[shader->GetName()] = shader;
+    }
+    {
+        Shader* shader = new Shader("BlurVertical");
+        shader->AddShader(PATH_JOIN(shaderPath, "VertexShader.glsl"), GL_VERTEX_SHADER);
+        shader->AddShader(PATH_JOIN(shaderPath, "FragmentShaderVertical.glsl"), GL_FRAGMENT_SHADER);
+        shader->CreateAndLink();
+        shaders[shader->GetName()] = shader;
+    }
+    {
+        Shader* shader = new Shader("ScreenDisplay");
+        shader->AddShader(PATH_JOIN(shaderPath, "VertexShader.glsl"), GL_VERTEX_SHADER);
+        shader->AddShader(PATH_JOIN(shaderPath, "FragmentShaderScreen.glsl"), GL_FRAGMENT_SHADER);
+        shader->CreateAndLink();
+        shaders[shader->GetName()] = shader;
+    }
+
+    // === NOU: Initializare textură CPU ===
+    // =====================================
+    //======== Parte CPU ===================
+    //======================================
+    cpuResultTexture = new Texture2D();
+    // Citim pixelii din imaginea incarcata initial in RAM
+    int w = originalImage->GetWidth();
+    int h = originalImage->GetHeight();
+    hostPixelData.resize(w * h * 4);
+
+    glBindTexture(GL_TEXTURE_2D, originalImage->GetTextureID());
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, hostPixelData.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+
+    //aici e extra
+    hostPixelData.resize(w * h * 4);
+    pass1Pixels.resize(w * h * 4);
+    pass2Pixels.resize(w * h * 4);
+
+    // Citire pixeli originali
+    glBindTexture(GL_TEXTURE_2D, originalImage->GetTextureID());
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, hostPixelData.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    dirtyCPU = true; // Forțăm un calcul inițial
+    // Inițializare textura CPU
+    GLuint texID;
+    glGenTextures(1, &texID);
+    glBindTexture(GL_TEXTURE_2D, texID);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, hostPixelData.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    cpuResultTexture->Init(texID, w, h, 4);
+}
+void Tema2::UploadCPUToGPU() // <--- Prefixul Tema2:: este obligatoriu!
+{
+    // Aici pui codul pe care ți l-am dat anterior:
+    int w = originalImage->GetWidth();
+    int h = originalImage->GetHeight();
+
+    unsigned char* srcData = hostPixelData.data();
+
+    if (viewMode == 1 && pass1Pixels.size() > 0) srcData = pass1Pixels.data();
+    else if (viewMode >= 2 && pass2Pixels.size() > 0) srcData = pass2Pixels.data();
+
+    static std::vector<unsigned char> uploadBuffer;
+    if (uploadBuffer.size() != w * h * 4) uploadBuffer.resize(w * h * 4);
+
+#pragma omp parallel for
+    for (int i = 0; i < w * h; ++i) {
+        uploadBuffer[i * 4 + 0] = srcData[i * 4 + 0];
+        uploadBuffer[i * 4 + 1] = srcData[i * 4 + 1];
+        uploadBuffer[i * 4 + 2] = srcData[i * 4 + 2];
+        uploadBuffer[i * 4 + 3] = 255;
+    }
+
+    glBindTexture(GL_TEXTURE_2D, cpuResultTexture->GetTextureID());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, uploadBuffer.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Tema2::ComputeCPUBlur()
+{
+    int imgW = originalImage->GetWidth();
+    int imgH = originalImage->GetHeight();
+    glm::ivec2 winRes = window->GetResolution();
+
+    if (kernels.size() < blurRadius + 1) {
+        int oldSize = (int)kernels.size();
+        kernels.resize(blurRadius + 1);
+        // Generăm doar ce lipsește pentru eficiență
+        for (int r = std::max(1, oldSize); r <= blurRadius; ++r) {
+            kernels[r] = ComputeKernel(r);
+        }
+    }
+
+    // 1. Inițializare Kernel
+    if (kernels.empty()) {
+        kernels.resize(blurRadius + 1);
+        for (int r = 1; r <= blurRadius; ++r) kernels[r] = ComputeKernel(r);
+    }
+
+    // 2. Mapare coordonate: Mouse -> Imagine
+    // Scoatem "1.0f -" pentru a anula inversarea diametral opusă
+    float relX = focusPos.x / (float)winRes.x;
+    float relY = focusPos.y / (float)winRes.y;
+
+    glm::vec2 imgFocus;
+    imgFocus.x = relX * (float)imgW;
+    imgFocus.y = relY * (float)imgH; // Mapare directă (fără inversare)
+
+    // Scalăm raza de focus pentru rezoluția imaginii
+    float scaledRadius = focusRadius * ((float)imgW / (float)winRes.x);
+
+    // 3. Pregătire Buffere
+    if (pass1Pixels.size() != imgW * imgH * 4) pass1Pixels.assign(imgW * imgH * 4, 0);
+    if (pass2Pixels.size() != imgW * imgH * 4) pass2Pixels.assign(imgW * imgH * 4, 0);
+
+    // === PASS 1: Orizontal ===
+#pragma omp parallel for schedule(dynamic)
+    for (int y = 0; y < imgH; ++y) {
+        for (int x = 0; x < imgW; ++x) {
+            float dist = glm::distance(glm::vec2((float)x, (float)y), imgFocus);
+
+            // FIX: Folosim * 2.0f ca în shader pentru o tranziție mai largă și mai puternică
+            float normalizedDist = glm::clamp((dist - scaledRadius) / (scaledRadius * 2.0f), 0.0f, 1.0f);
+            int idx = (y * imgW + x) * 4;
+
+            int r = int(float(blurRadius) * normalizedDist);
+
+            if (r < 1) {
+                for (int c = 0; c < 3; c++) pass1Pixels[idx + c] = hostPixelData[idx + c];
+                pass1Pixels[idx + 3] = 0;
+            }
+            else {
+                r = glm::clamp(r, 1, blurRadius);
+                const auto& kernel = kernels[r];
+                float rSum = 0, gSum = 0, bSum = 0;
+                for (int k = -r; k <= r; k++) {
+                    int sx = glm::clamp(x + k, 0, imgW - 1);
+                    int sIdx = (y * imgW + sx) * 4;
+                    rSum += hostPixelData[sIdx + 0] * kernel[k + r];
+                    gSum += hostPixelData[sIdx + 1] * kernel[k + r];
+                    bSum += hostPixelData[sIdx + 2] * kernel[k + r];
+                }
+                pass1Pixels[idx + 0] = (unsigned char)glm::clamp(rSum, 0.0f, 255.0f);
+                pass1Pixels[idx + 1] = (unsigned char)glm::clamp(gSum, 0.0f, 255.0f);
+                pass1Pixels[idx + 2] = (unsigned char)glm::clamp(bSum, 0.0f, 255.0f);
+                pass1Pixels[idx + 3] = (unsigned char)(normalizedDist * 255.0f);
+            }
+        }
+    }
+
+    // === PASS 2: Vertical ===
+#pragma omp parallel for schedule(dynamic)
+    for (int y = 0; y < imgH; ++y) {
+        for (int x = 0; x < imgW; ++x) {
+            int idx = (y * imgW + x) * 4;
+            float blurAmount = pass1Pixels[idx + 3] / 255.0f;
+            int r = int(float(blurRadius) * blurAmount);
+
+            if (r < 1) {
+                for (int c = 0; c < 3; c++) pass2Pixels[idx + c] = pass1Pixels[idx + c];
+            }
+            else {
+                r = glm::clamp(r, 1, blurRadius);
+                const auto& kernel = kernels[r];
+                float rSum = 0, gSum = 0, bSum = 0;
+                for (int k = -r; k <= r; k++) {
+                    int sy = glm::clamp(y + k, 0, imgH - 1);
+                    int sIdx = (sy * imgW + x) * 4;
+                    float weight = kernel[k + r];
+                    rSum += pass1Pixels[sIdx + 0] * weight;
+                    gSum += pass1Pixels[sIdx + 1] * weight;
+                    bSum += pass1Pixels[sIdx + 2] * weight;
+                }
+                pass2Pixels[idx + 0] = (unsigned char)glm::clamp(rSum, 0.0f, 255.0f);
+                pass2Pixels[idx + 1] = (unsigned char)glm::clamp(gSum, 0.0f, 255.0f);
+                pass2Pixels[idx + 2] = (unsigned char)glm::clamp(bSum, 0.0f, 255.0f);
+            }
+            pass2Pixels[idx + 3] = 255;
+        }
+    }
+}
+
+std::vector<float> Tema2::ComputeKernel(int radius) {
+    std::vector<float> kernel(2 * radius + 1);
+    float sigma = std::max(radius / 2.0f, 1.0f);
+    float sum = 0.0f;
+
+    for (int i = -radius; i <= radius; ++i) {
+        float weight = (1.0f / (2.5066f * sigma)) * exp(-((i * i) / (2.0f * sigma * sigma)));
+        kernel[i + radius] = weight;
+        sum += weight;
+    }
+
+    // Normalizare
+    for (float& w : kernel) w /= sum;
+    return kernel;
+}
+//parte cpu cu 2 passuri (vertical si orizontal)
+
+// Adaugă o nouă variabilă membră în Tema2.h pentru a urmări dacă parametrii de blur s-au schimbat
+// bool paramsChanged = true; 
+// (Pune-o pe true la Init, la OnFileSelected, și la OnMouse/Radius change. La OnKeyPress (0-4) NU o schimba, las-o false)
+
+void Tema2::ProcessBlurCPU()
+{
+    int w = originalImage->GetWidth();
+    int h = originalImage->GetHeight();
+    int channels = 4;
+
+    // DEBUG: Verificam daca avem date
+    if (hostPixelData.size() == 0) {
+        cout << "[CPU Error] hostPixelData is empty! Reloading..." << endl;
+        hostPixelData.resize(w * h * 4);
+        glBindTexture(GL_TEXTURE_2D, originalImage->GetTextureID());
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, hostPixelData.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    // DEBUG: Verificam un pixel din centru
+    int centerIdx = ((h / 2) * w + (w / 2)) * 4;
+    // cout << "[CPU Data Check] Center Pixel R=" << (int)hostPixelData[centerIdx] << endl;
+
+    if (pass1Pixels.size() != w * h * 4) pass1Pixels.resize(w * h * 4);
+    if (pass2Pixels.size() != w * h * 4) pass2Pixels.resize(w * h * 4);
+
+    // ... [Calcul Kernel ramane la fel] ...
+    if (kernels.empty()) {
+        kernels.resize(blurRadius + 1);
+        for (int r = 1; r <= blurRadius; ++r) kernels[r] = ComputeKernel(r);
+    }
+
+    glm::vec2 texFocusPos = focusPos;
+    texFocusPos.y = h - texFocusPos.y;
+
+    // === PASS 1 ===
+#pragma omp parallel for schedule(dynamic)
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float dist = glm::distance(glm::vec2(x, y), texFocusPos);
+            float normalizedDist = (dist - focusRadius) / focusRadius;
+            float blurAmount = glm::clamp(normalizedDist, 0.0f, 1.0f);
+            int idx = (y * w + x) * channels;
+
+            // Daca e in focus, copiem pur si simplu
+            if (blurAmount < 0.05f) {
+                pass1Pixels[idx + 0] = hostPixelData[idx + 0];
+                pass1Pixels[idx + 1] = hostPixelData[idx + 1];
+                pass1Pixels[idx + 2] = hostPixelData[idx + 2];
+                pass1Pixels[idx + 3] = 0;
+            }
+            else {
+                int radius = (int)(blurAmount * blurRadius);
+                if (radius < 1) radius = 1;
+                const std::vector<float>& kernel = kernels[radius];
+
+                glm::vec3 colorSum(0.0f);
+                for (int k = -radius; k <= radius; ++k) {
+                    int sampleX = glm::clamp(x + k, 0, w - 1);
+                    int sampleIdx = (y * w + sampleX) * channels;
+                    float weight = kernel[k + radius];
+                    colorSum.r += hostPixelData[sampleIdx + 0] * weight;
+                    colorSum.g += hostPixelData[sampleIdx + 1] * weight;
+                    colorSum.b += hostPixelData[sampleIdx + 2] * weight;
+                }
+                pass1Pixels[idx + 0] = (unsigned char)colorSum.r;
+                pass1Pixels[idx + 1] = (unsigned char)colorSum.g;
+                pass1Pixels[idx + 2] = (unsigned char)colorSum.b;
+                pass1Pixels[idx + 3] = (unsigned char)(blurAmount * 255.0f);
+            }
+        }
+    }
+
+    // === PASS 2 ===
+#pragma omp parallel for schedule(dynamic)
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            int idx = (y * w + x) * channels;
+            float blurAmount = pass1Pixels[idx + 3] / 255.0f;
+
+            if (blurAmount < 0.05f) {
+                pass2Pixels[idx + 0] = pass1Pixels[idx + 0];
+                pass2Pixels[idx + 1] = pass1Pixels[idx + 1];
+                pass2Pixels[idx + 2] = pass1Pixels[idx + 2];
+                pass2Pixels[idx + 3] = 255;
+            }
+            else {
+                int radius = (int)(blurAmount * blurRadius);
+                if (radius < 1) radius = 1;
+                const std::vector<float>& kernel = kernels[radius];
+
+                glm::vec3 colorSum(0.0f);
+                for (int k = -radius; k <= radius; ++k) {
+                    int sampleY = glm::clamp(y + k, 0, h - 1);
+                    int sampleIdx = (sampleY * w + x) * channels;
+                    float weight = kernel[k + radius];
+                    colorSum.r += pass1Pixels[sampleIdx + 0] * weight;
+                    colorSum.g += pass1Pixels[sampleIdx + 1] * weight;
+                    colorSum.b += pass1Pixels[sampleIdx + 2] * weight;
+                }
+                pass2Pixels[idx + 0] = (unsigned char)colorSum.r;
+                pass2Pixels[idx + 1] = (unsigned char)colorSum.g;
+                pass2Pixels[idx + 2] = (unsigned char)colorSum.b;
+                pass2Pixels[idx + 3] = 255;
+            }
+        }
+    }
+
+    // === VIZUALIZARE SI UPLOAD ===
+    static std::vector<unsigned char> vizBuffer;
+    if (vizBuffer.size() != w * h * 4) vizBuffer.resize(w * h * 4);
+
+    unsigned char* src = nullptr;
+    if (viewMode == 0) src = hostPixelData.data();
+    else if (viewMode == 1) src = pass1Pixels.data();
+    else src = pass2Pixels.data();
+
+    // Copiere si FORTARE Alpha
+#pragma omp parallel for
+    for (int i = 0; i < w * h; ++i) {
+        vizBuffer[i * 4 + 0] = src[i * 4 + 0];
+        vizBuffer[i * 4 + 1] = src[i * 4 + 1];
+        vizBuffer[i * 4 + 2] = src[i * 4 + 2];
+        vizBuffer[i * 4 + 3] = 255; // SUPER IMPORTANT: Opacitate maxima
+    }
+
+    // Gestionare textura OpenGL manuala pentru siguranta
+    GLuint texID = cpuResultTexture->GetTextureID();
+    if (texID == 0) {
+        glGenTextures(1, &texID);
+        // Setam ID-ul in obiectul wrapper
+        cpuResultTexture->Init(texID, w, h, 4);
+    }
+
+    glBindTexture(GL_TEXTURE_2D, texID);
+    // Folosim glTexImage2D mereu (mai sigur decat SubImage daca formatul difera)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, vizBuffer.data());
+
+    // Setam parametrii obligatorii (fara ei textura e neagra/invalida!)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+void Tema2::ApplyCannyFilter()
+{
+    int width = originalImage->GetWidth();
+    int height = originalImage->GetHeight();
+
+    // 1. Extragem pixelii originali
+    std::vector<unsigned char> pixels(width * height * 4);
+    glBindTexture(GL_TEXTURE_2D, originalImage->GetTextureID());
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Buffere intermediare
+    std::vector<float> grayscale(width * height);
+    std::vector<float> blurred(width * height);
+    std::vector<float> magnitude(width * height, 0.0f);
+    std::vector<float> angle(width * height, 0.0f);
+    std::vector<unsigned char> edgeData(width * height * 4, 0);
+
+    // 2. Conversie Grayscale (Luminanță precisă)
+    for (int i = 0; i < width * height; i++) {
+        grayscale[i] = 0.299f * pixels[i * 4] + 0.587f * pixels[i * 4 + 1] + 0.114f * pixels[i * 4 + 2];
+    }
+
+    // 3. Blur Gaussian simplificat (3x3) pentru a elimina marginile false (zgomotul)
+    for (int y = 1; y < height - 1; y++) {
+        for (int x = 1; x < width - 1; x++) {
+            float sum = 0;
+            for (int i = -1; i <= 1; i++) {
+                for (int j = -1; j <= 1; j++) {
+                    sum += grayscale[(y + i) * width + (x + j)];
+                }
+            }
+            blurred[y * width + x] = sum / 9.0f;
+        }
+    }
+
+    // 4. Operatori Sobel (Magnitudine și Direcție)
+    int Gx[3][3] = { {-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1} };
+    int Gy[3][3] = { {-1, -2, -1}, {0, 0, 0}, {1, 2, 1} };
+
+    for (int y = 1; y < height - 1; y++) {
+        for (int x = 1; x < width - 1; x++) {
+            float sumX = 0, sumY = 0;
+            for (int i = -1; i <= 1; i++) {
+                for (int j = -1; j <= 1; j++) {
+                    float val = blurred[(y + i) * width + (x + j)];
+                    sumX += val * Gx[i + 1][j + 1];
+                    sumY += val * Gy[i + 1][j + 1];
+                }
+            }
+            magnitude[y * width + x] = std::sqrt(sumX * sumX + sumY * sumY);
+            angle[y * width + x] = std::atan2(sumY, sumX) * 180.0f / 3.14159f; // Convertim in grade
+        }
+    }
+
+    // 5. Non-Maximum Suppression (Subțierea marginilor la 1 pixel)
+    for (int y = 1; y < height - 1; y++) {
+        for (int x = 1; x < width - 1; x++) {
+            float mag = magnitude[y * width + x];
+            float ang = angle[y * width + x];
+            if (ang < 0) ang += 180;
+
+            float neighbor1 = 0, neighbor2 = 0;
+
+            // Aproximăm direcția gradientului la 0, 45, 90 sau 135 grade
+            if ((ang >= 0 && ang < 22.5) || (ang >= 157.5 && ang <= 180)) {
+                neighbor1 = magnitude[y * width + (x + 1)];
+                neighbor2 = magnitude[y * width + (x - 1)];
+            }
+            else if (ang >= 22.5 && ang < 67.5) {
+                neighbor1 = magnitude[(y + 1) * width + (x - 1)];
+                neighbor2 = magnitude[(y - 1) * width + (x + 1)];
+            }
+            else if (ang >= 67.5 && ang < 112.5) {
+                neighbor1 = magnitude[(y + 1) * width + x];
+                neighbor2 = magnitude[(y - 1) * width + x];
+            }
+            else {
+                neighbor1 = magnitude[(y + 1) * width + (x + 1)];
+                neighbor2 = magnitude[(y - 1) * width + (x - 1)];
+            }
+
+            // Dacă pixelul curent nu este maximul local, îl eliminăm
+            unsigned char val = 0;
+            if (mag >= neighbor1 && mag >= neighbor2) {
+                // Prag (Thresholding) - poți ajusta 70.0f pentru mai multe/mai puține detalii
+                val = (mag > 70.0f) ? 255 : 0;
+            }
+
+            int outIdx = (y * width + x) * 4;
+            edgeData[outIdx] = val;
+            edgeData[outIdx + 1] = val;
+            edgeData[outIdx + 2] = val;
+            edgeData[outIdx + 3] = 255;
+        }
+    }
+
+    // 6. Creare textură OpenGL
+    if (cannyTexture) delete cannyTexture;
+    cannyTexture = new Texture2D();
+
+    GLuint texID;
+    glGenTextures(1, &texID);
+    glBindTexture(GL_TEXTURE_2D, texID);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, edgeData.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    cannyTexture->Init(texID, width, height, 4);
+}
+void Tema2::CreateFramebuffers(int width, int height)
+{
+    // Stergem vechile buffere
+    if (fboHorizontal) glDeleteFramebuffers(1, &fboHorizontal);
+    if (textureHorizontal) glDeleteTextures(1, &textureHorizontal);
+    if (fboVertical) glDeleteFramebuffers(1, &fboVertical);
+    if (textureVertical) glDeleteTextures(1, &textureVertical);
+
+    // FBO 1 (Horizontal)
+    glGenFramebuffers(1, &fboHorizontal);
+    glBindFramebuffer(GL_FRAMEBUFFER, fboHorizontal);
+    glGenTextures(1, &textureHorizontal);
+    glBindTexture(GL_TEXTURE_2D, textureHorizontal);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textureHorizontal, 0);
+
+    // FBO 2 (Vertical)
+    glGenFramebuffers(1, &fboVertical);
+    glBindFramebuffer(GL_FRAMEBUFFER, fboVertical);
+    glGenTextures(1, &textureVertical);
+    glBindTexture(GL_TEXTURE_2D, textureVertical);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textureVertical, 0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void Tema2::Update(float deltaTimeSeconds)
+{
+    //cout << dirtyTexture << "\n";
+    glm::ivec2 res = window->GetResolution();
+    // === MOD CANNY (ACTIVAT CU 'D') ===
+    if (showCanny && cannyTexture) {
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        auto shader = shaders["ScreenDisplay"];
+        shader->Use();
+
+        // Trimitem viewMode 0 (Original) pentru a afisa textura bruta
+        glUniform1i(shader->GetUniformLocation("viewMode"), 0);
+
+        cannyTexture->BindToTextureUnit(GL_TEXTURE0);
+        glUniform1i(shader->GetUniformLocation("texOriginal"), 0);
+
+        RenderMesh(meshes["quad"], shader, glm::mat4(1));
+        return; // Iesim din functie, nu mai facem blur
+    }
+    if (!useGPU) {
+        bool blurIsVisible = (viewMode == 1 || viewMode == 2 || (viewMode == 4 && showBlurInFinal));
+
+        // 1. Recalculăm pixeli DOAR dacă e nevoie de blur ȘI s-a schimbat ceva (dirtyCPU)
+        if (dirtyCPU && blurIsVisible) {
+            ComputeCPUBlur();
+            dirtyCPU = false;
+            dirtyTexture = true;
+        }
+
+        // 2. Uploadăm pe GPU doar dacă avem date noi
+        if (dirtyTexture && blurIsVisible) {
+            UploadCPUToGPU();
+            dirtyTexture = false;
+        }
+
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        auto shader = shaders["ScreenDisplay"];
+        shader->Use();
+
+        int effectiveViewMode = (viewMode == 4 && !showBlurInFinal) ? 5 : viewMode;
+        glUniform1i(shader->GetUniformLocation("viewMode"), effectiveViewMode);
+
+        // Uniformele de mouse se trimit MEREU (pentru ca cercurile să fie fluide în mod 5)
+        glUniform2f(shader->GetUniformLocation("screenSize"), (float)res.x, (float)res.y);
+        glUniform2f(shader->GetUniformLocation("focusPos"), focusPos.x, (float)res.y - focusPos.y);
+        glUniform1f(shader->GetUniformLocation("focusRadius"), focusRadius);
+
+        // Bindings (rămân la fel ca în soluția anterioară)
+        originalImage->BindToTextureUnit(GL_TEXTURE0);
+        glUniform1i(shader->GetUniformLocation("texOriginal"), 0);
+        cpuResultTexture->BindToTextureUnit(GL_TEXTURE1);
+        glUniform1i(shader->GetUniformLocation("texPass1"), 1);
+        cpuResultTexture->BindToTextureUnit(GL_TEXTURE2);
+        glUniform1i(shader->GetUniformLocation("texPass2"), 2);
+
+        RenderMesh(meshes["quad"], shader, glm::mat4(1));
+        //aici randez scris pentru cpu
+
+        {
+            glDisable(GL_DEPTH_TEST); // Ne asigurăm că textul apare peste imagine
+
+            // 1. Pregătim informațiile sub formă de text
+            string modeText = "Mode: " + string(useGPU ? "GPU" : "CPU");
+            string radiusText = "Focus Radius: " + to_string((int)focusRadius);
+            string viewText = "View Pass: " + to_string(viewMode);
+
+            // 2. Randăm textul într-un colț al ecranului (ex: stânga sus)
+            glm::vec3 kHudColor = glm::vec3(1, 1, 0); // Galben pentru vizibilitate
+            float startY = 30.0f;
+            float stepY = 25.0f;
+            string mouseText = "Mouse Pos: " + to_string((int)focusPos.x) + ", " + to_string((int)focusPos.y);
+            textRenderer->RenderText(modeText, 20.0f, startY, 1.0f, kHudColor);
+            textRenderer->RenderText(radiusText, 20.0f, startY + stepY, 1.0f, kHudColor);
+            textRenderer->RenderText(viewText, 20.0f, startY + 2 * stepY, 1.0f, kHudColor);
+            textRenderer->RenderText(mouseText, 20.0f, startY + 3 * stepY, 1.0f, kHudColor);
+
+            if (showCanny) {
+                textRenderer->RenderText("Filter: CANNY ACTIVE", 20.0f, startY + 3 * stepY, 1.0f, glm::vec3(0, 1, 0));
+            }
+
+            glEnable(GL_DEPTH_TEST);
+        }
+
+        return;
+    }
+
+    // === MOD NORMAL (BLUR PIPELINE) ===
+
+    // PASS 1: Blur Orizontal -> scrie in fboHorizontal
+    glBindFramebuffer(GL_FRAMEBUFFER, fboHorizontal);
+    glViewport(0, 0, res.x, res.y);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    auto shaderH = shaders["BlurHorizontal"];
+    shaderH->Use();
+    glUniform2f(shaderH->GetUniformLocation("screenSize"), (float)res.x, (float)res.y);
+    glUniform2f(shaderH->GetUniformLocation("focusPos"), focusPos.x, res.y - focusPos.y);
+    glUniform1f(shaderH->GetUniformLocation("focusRadius"), focusRadius);
+
+    glUniform1i(shaderH->GetUniformLocation("u_texture"), 0);
+    originalImage->BindToTextureUnit(GL_TEXTURE0);
+    glUniform1i(shaderH->GetUniformLocation("blurRadius"), blurRadius);
+
+    RenderMesh(meshes["quad"], shaderH, glm::mat4(1));
+
+    // PASS 2: Blur Vertical -> scrie in fboVertical
+    glBindFramebuffer(GL_FRAMEBUFFER, fboVertical);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    auto shaderV = shaders["BlurVertical"];
+    shaderV->Use();
+    glUniform2f(shaderV->GetUniformLocation("screenSize"), (float)res.x, (float)res.y);
+
+    glUniform1i(shaderV->GetUniformLocation("u_texture"), 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textureHorizontal);
+
+    glUniform1i(shaderV->GetUniformLocation("blurRadius"), blurRadius);
+
+    RenderMesh(meshes["quad"], shaderV, glm::mat4(1));
+
+    // PASS 3: Ecran Final -> combina totul
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, res.x, res.y);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    auto shaderS = shaders["ScreenDisplay"];
+    shaderS->Use();
+
+    int effectiveViewMode = (viewMode == 4 && !showBlurInFinal) ? 5 : viewMode;
+    glUniform1i(shaderS->GetUniformLocation("viewMode"), effectiveViewMode);
+    //glUniform1i(shaderS->GetUniformLocation("viewMode"), viewMode);
+    glUniform2f(shaderS->GetUniformLocation("screenSize"), (float)res.x, (float)res.y);
+    glUniform2f(shaderS->GetUniformLocation("focusPos"), focusPos.x, res.y - focusPos.y);
+    glUniform1f(shaderS->GetUniformLocation("focusRadius"), focusRadius);
+
+    // Bind textures: 0 = Original, 1 = Pass1, 2 = Pass2
+    glUniform1i(shaderS->GetUniformLocation("texOriginal"), 0);
+    originalImage->BindToTextureUnit(GL_TEXTURE0);
+
+    glUniform1i(shaderS->GetUniformLocation("texPass1"), 1);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, textureHorizontal);
+
+    glUniform1i(shaderS->GetUniformLocation("texPass2"), 2);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, textureVertical);
+
+    RenderMesh(meshes["quad"], shaderS, glm::mat4(1));
+
+    {
+        glDisable(GL_DEPTH_TEST); // Ne asigurăm că textul apare peste imagine
+
+        // 1. Pregătim informațiile sub formă de text
+        string modeText = "Mode: " + string(useGPU ? "GPU" : "CPU");
+        string radiusText = "Focus Radius: " + to_string((int)focusRadius);
+        string viewText = "View Pass: " + to_string(viewMode);
+
+        // 2. Randăm textul într-un colț al ecranului (ex: stânga sus)
+        glm::vec3 kHudColor = glm::vec3(1, 1, 0); // Galben pentru vizibilitate
+        float startY = 30.0f;
+        float stepY = 25.0f;
+
+        textRenderer->RenderText(modeText, 20.0f, startY, 1.0f, kHudColor);
+        textRenderer->RenderText(radiusText, 20.0f, startY + stepY, 1.0f, kHudColor);
+        textRenderer->RenderText(viewText, 20.0f, startY + 2 * stepY, 1.0f, kHudColor);
+
+        string mouseText = "Mouse Pos: " + to_string((int)focusPos.x) + ", " + to_string((int)focusPos.y);
+        textRenderer->RenderText(mouseText, 20.0f, startY + 3 * stepY, 1.0f, kHudColor);
+
+        if (showCanny) {
+            textRenderer->RenderText("Filter: CANNY ACTIVE", 20.0f, startY + 3 * stepY, 1.0f, glm::vec3(0, 1, 0));
+        }
+
+        glEnable(GL_DEPTH_TEST);
+    }
+}
+
+void Tema2::OnKeyPress(int key, int mods)
+{
+    if (key == GLFW_KEY_F) OpenDialog();
+
+    if (key == GLFW_KEY_E) {
+        useGPU = !useGPU;
+        cout << "Mode switched to: " << (useGPU ? "GPU" : "CPU") << endl;
+        if (useGPU == false)
+        {
+            //ComputeCPUBlur();
+            dirtyCPU = true;
+        }
+    }
+
+    // Schimba modurile de vizualizare pentru Blur (0=Orig, 1=BlurH, 2=BlurV, 4=Final)
+    if (key >= GLFW_KEY_0 && key < GLFW_KEY_4) {
+        viewMode = key - GLFW_KEY_0;
+
+        // === FIX ===
+        // Semnalizăm că vrem să vedem alt buffer, deci trebuie upload pe GPU
+        cout << "Click" << "\n";
+        if (!useGPU) {
+            dirtyTexture = true;
+        }
+
+    }
+    if (key == GLFW_KEY_4) {
+        if (viewMode == 4) {
+            // Dacă suntem deja pe 4, facem toggle între Blur și Original
+            showBlurInFinal = !showBlurInFinal;
+        }
+        else {
+            // Dacă venim din alt mod, activăm modul 4 cu blur-ul activ
+            viewMode = 4;
+            showBlurInFinal = true;
+        }
+
+        if (!useGPU) {
+            dirtyTexture = true;
+        }
+
+        cout << "Final Mode: " << (showBlurInFinal ? "Blur + Circles" : "Original + Circles") << endl;
+    }
+
+    // Toggle Canny Filter
+    if (key == GLFW_KEY_D) {
+        showCanny = !showCanny;
+        if (showCanny) {
+            ApplyCannyFilter();
+        }
+    }
+
+    if (key == GLFW_KEY_UP) {
+        blurRadius = std::min(ABSOLUTE_MAX_RADIUS, blurRadius + 2);
+        dirtyCPU = true; // Forțăm recalcularea kernelului pe CPU
+        cout << "Blur Radius: " << blurRadius << endl;
+    }
+
+    if (key == GLFW_KEY_DOWN) {
+        blurRadius = std::max(1, blurRadius - 2);
+        dirtyCPU = true;
+        cout << "Blur Radius: " << blurRadius << endl;
+    }
+
+
+    if (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD)
+    {
+        focusRadius += 5.0f;
+        if (!useGPU) dirtyCPU = true;
+    }
+    if (key == GLFW_KEY_MINUS || key == GLFW_KEY_KP_SUBTRACT) {
+        focusRadius = std::max(0.0f, focusRadius - 5.0f);
+        if (!useGPU) dirtyCPU = true;
+    }
+}
+
+void Tema2::OnMouseMove(int mouseX, int mouseY, int deltaX, int deltaY)
+{
+    if (window->MouseHold(GLFW_MOUSE_BUTTON_LEFT)) {
+        focusPos = glm::vec2(mouseX, mouseY);
+        if (!useGPU) dirtyCPU = true;
+    }
+}
+
+void Tema2::OnMouseBtnPress(int mouseX, int mouseY, int button, int mods)
+{
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        focusPos = glm::vec2(mouseX, mouseY);
+        if (!useGPU) dirtyCPU = true;
+    }
+}
+
+void Tema2::OnWindowResize(int width, int height)
+{
+    CreateFramebuffers(width, height);
+}
+
+void Tema2::OnFileSelected(const std::string& fileName)
+{
+    if (!fileName.empty()) {
+        originalImage = TextureManager::LoadTexture(fileName, nullptr, "image", true, true);
+
+        // Daca filtrul e activ, trebuie recalculat pentru noua imagine
+        if (showCanny) ApplyCannyFilter();
+
+        //Parte CPU
+        int w = originalImage->GetWidth();
+        int h = originalImage->GetHeight();
+        hostPixelData.resize(w * h * 4);
+
+        glBindTexture(GL_TEXTURE_2D, originalImage->GetTextureID());
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, hostPixelData.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        // Resetam marimea ferestrei
+        float ar = static_cast<float>(originalImage->GetWidth()) / originalImage->GetHeight();
+        window->SetSize(static_cast<int>(600 * ar), 600);
+
+        // Resetam focusul in centru
+        glm::ivec2 res = window->GetResolution();
+        focusPos = glm::vec2(res.x / 2.0f, res.y / 2.0f);
+    }
+}
+
+void Tema2::OpenDialog()
+{
+    std::vector<std::string> filters = { "Image Files", "*.png *.jpg *.jpeg *.bmp", "All Files", "*" };
+    auto selection = pfd::open_file("Select a file", ".", filters).result();
+    if (!selection.empty()) OnFileSelected(selection[0]);
+}
+
+void Tema2::FrameStart() {}
+void Tema2::FrameEnd() { DrawCoordinateSystem(); }
+void Tema2::OnInputUpdate(float deltaTime, int mods) {}
+void Tema2::OnMouseBtnRelease(int mouseX, int mouseY, int button, int mods) {}
+void Tema2::OnMouseScroll(int mouseX, int mouseY, int offsetX, int offsetY) {}
+void Tema2::OnKeyRelease(int key, int mods) {}
