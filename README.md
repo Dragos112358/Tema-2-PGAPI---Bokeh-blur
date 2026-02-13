@@ -15,7 +15,7 @@ Acest proiect este o aplicație interactivă de procesare a imaginilor dezvoltat
 | <img src="screenshots/poza7.PNG" width="100%" /> | <img src="screenshots/poza8.PNG" width="100%" /> |
 | *Pencil sketch (Tasta 7)* | *Thermal vision (Tasta 8)* |
 | <img src="screenshots/poza9.PNG" width="100%" /> | <img src="screenshots/poza10.PNG" width="100%" /> |
-| *Filtru bilateral(Tasta 9)* | *Thermal vision (Tasta 8)* |
+| *Filtru bilateral(Tasta 9)* | *Filtru Canny (Tasta D)* |
 ---
 
 ## Funcționalități Principale & Bonusuri
