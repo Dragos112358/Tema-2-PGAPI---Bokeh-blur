@@ -7,13 +7,15 @@ Acest proiect este o aplicație interactivă de procesare a imaginilor dezvoltat
 
 | <img src="screenshots/poza1.PNG" width="100%" /> | <img src="screenshots/poza2.PNG" width="100%" /> |
 |:---:|:---:|
-| *Efect de Blur Interactiv (Focus)* | *Afișarea măștii de ponderare (Tasta 5)* |
+| *Poza inițială* | *Aplicare blur orizontal (Tasta 1)* |
 | <img src="screenshots/poza3.PNG" width="100%" /> | <img src="screenshots/poza4.PNG" width="100%" /> |
-| *Canny Edge Detection (Tasta D)* | *Efect de Pictură în Ulei (Tasta 6)* |
+| *Blur orizontal + vertical (Tasta 2)* | *Afișare zonă circulară fără blur (Tasta 4)* |
 | <img src="screenshots/poza5.PNG" width="100%" /> | <img src="screenshots/poza6.PNG" width="100%" /> |
-| *Schiță în Creion (Tasta 7)* | *Thermal Vision / Heatmap (Tasta 8)* |
+| *Afișare zonă de blur alb-negru (Tasta 5)* | *Oil painting (Tasta 6)* |
 | <img src="screenshots/poza7.PNG" width="100%" /> | <img src="screenshots/poza8.PNG" width="100%" /> |
-| *Bilateral Filter (Tasta 9)* | *Vizualizare interfață (HUD)* |
+| *Pencil sketch (Tasta 7)* | *Thermal vision (Tasta 8)* |
+| <img src="screenshots/poza9.PNG" width="100%" /> | <img src="screenshots/poza10.PNG" width="100%" /> |
+| *Filtru bilateral(Tasta 9)* | *Thermal vision (Tasta 8)* |
 ---
 
 ## Funcționalități Principale & Bonusuri
